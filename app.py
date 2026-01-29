@@ -5,12 +5,39 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 import io
 
-# --- PAGE SETUP ---
+# --- PAGE CONFIG ---
 st.set_page_config(page_title="Vivek's Pro Dashboard", layout="wide")
 st.title("📡 NSE Daily Scanner (Drive Connected)")
 
-# --- 1. SETUP GOOGLE DRIVE ---
-# We use the same secret key you added earlier
+# --- 1. ROBUST AI SETUP (Self-Healing) ---
+model = None
+try:
+    if "GEMINI_API_KEY" in st.secrets:
+        genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+        
+        # Ask Google: "What models do you have?"
+        available_models = []
+        try:
+            for m in genai.list_models():
+                if 'generateContent' in m.supported_generation_methods:
+                    available_models.append(m.name)
+        except:
+            pass # If listing fails, we will try defaults
+            
+        # Smart Selection Logic
+        target_model = "models/gemini-pro" # Default safe option
+        if 'models/gemini-1.5-flash' in available_models:
+            target_model = 'models/gemini-1.5-flash'
+        elif 'models/gemini-1.5-pro' in available_models:
+            target_model = 'models/gemini-1.5-pro'
+            
+        model = genai.GenerativeModel(target_model)
+    else:
+        st.warning("⚠️ AI Key missing. Check 'GEMINI_API_KEY' in secrets.")
+except Exception as e:
+    st.warning(f"AI functionality disabled due to error: {e}")
+
+# --- 2. SETUP GOOGLE DRIVE ---
 try:
     if "gcp_service_account" in st.secrets:
         creds_dict = dict(st.secrets["gcp_service_account"])
@@ -20,112 +47,99 @@ try:
         )
         drive_service = build('drive', 'v3', credentials=creds)
     else:
-        st.error("⚠️ Secrets Error: 'gcp_service_account' not found in Streamlit secrets.")
+        st.error("⚠️ Secrets Error: 'gcp_service_account' not found.")
         st.stop()
 except Exception as e:
     st.error(f"Authentication Error: {e}")
     st.stop()
 
-# --- 2. SETUP AI ---
-model = None
-if "GEMINI_API_KEY" in st.secrets:
-    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-    model = genai.GenerativeModel('gemini-1.5-flash')
-
-# --- 3. LOAD DATA FROM DRIVE (Fast & Cached) ---
-@st.cache_data(ttl=3600) # Data stays in memory for 1 hour
+# --- 3. LOAD DATA FROM DRIVE ---
+@st.cache_data(ttl=3600)
 def load_data_from_drive():
     try:
-        # Search for the specific filename
         query = "name = 'latest_nse_data.csv' and trashed = false"
         results = drive_service.files().list(q=query, fields="files(id, name)").execute()
         files = results.get('files', [])
         
-        if not files:
-            return None
+        if not files: return None
         
-        # Download the file content
         file_id = files[0]['id']
         request = drive_service.files().get_media(fileId=file_id)
         downloaded = io.BytesIO(request.execute())
         
-        df = pd.read_csv(downloaded)
-        return df
+        return pd.read_csv(downloaded)
     except Exception as e:
         st.error(f"Drive Read Error: {e}")
         return None
 
 # --- 4. DASHBOARD UI ---
-with st.spinner("Connecting to your 2TB Google Drive..."):
+with st.spinner("Accessing Cloud Database..."):
     data = load_data_from_drive()
 
 if data is None:
-    st.error("❌ 'latest_nse_data.csv' not found in Drive. Please run the GitHub Action once.")
+    st.error("❌ Data file not found. Please run the GitHub Action.")
 else:
-    # Success! Show timestamp if available
-    st.success("✅ Data loaded from Google Drive instantly!")
+    # Success Message
+    st.success(f"✅ Market Data Loaded Successfully! ({len(data)} stocks)")
     
-    # Clean Column Names
+    # Cleaning
     data.columns = [c.replace('"', '').strip() for c in data.columns]
     
-    # Identify Delivery Column
+    # Column Finder
     target_col = "%DlyQttoTradedQty"
     if target_col not in data.columns:
         possible = [c for c in data.columns if "DlyQt" in c or "DELIV" in c]
         if possible: target_col = possible[0]
         
     if target_col in data.columns:
-        # Ensure numeric
         data[target_col] = pd.to_numeric(data[target_col], errors='coerce').fillna(0)
         
-        # --- BUCKET TABS ---
+        # --- BUCKETS ---
         st.divider()
-        st.subheader("📊 Market Delivery Buckets")
+        tab1, tab2, tab3 = st.tabs(["🔥 Strong Buying (>80%)", "💎 Accumulation (60-80%)", "⚠️ Weak (<40%)"])
         
-        tab1, tab2, tab3, tab4 = st.tabs([
-            "🔥 80-100% (Strong)", 
-            "💎 60-80% (High)", 
-            "✅ 40-60% (Medium)", 
-            "⚠️ <40% (Weak)"
-        ])
-        
-        # Filter Logic
-        cols_to_show = ['SYMBOL', 'SERIES', 'CLOSE_PRICE', target_col]
+        cols = ['SYMBOL', 'CLOSE_PRICE', target_col]
         
         with tab1:
-            df_80 = data[data[target_col] >= 80].sort_values(by=target_col, ascending=False)
-            st.dataframe(df_80[cols_to_show], use_container_width=True)
-            
+            st.dataframe(data[data[target_col] >= 80][cols].sort_values(by=target_col, ascending=False), use_container_width=True)
         with tab2:
-            df_60 = data[(data[target_col] >= 60) & (data[target_col] < 80)].sort_values(by=target_col, ascending=False)
-            st.dataframe(df_60[cols_to_show], use_container_width=True)
-            
+            st.dataframe(data[(data[target_col] >= 60) & (data[target_col] < 80)][cols].sort_values(by=target_col, ascending=False), use_container_width=True)
         with tab3:
-            df_40 = data[(data[target_col] >= 40) & (data[target_col] < 60)].sort_values(by=target_col, ascending=False)
-            st.dataframe(df_40[cols_to_show], use_container_width=True)
+            st.dataframe(data[data[target_col] < 40][cols].sort_values(by=target_col, ascending=False), use_container_width=True)
 
-        with tab4:
-            df_low = data[data[target_col] < 40].sort_values(by=target_col, ascending=False)
-            st.dataframe(df_low[cols_to_show], use_container_width=True)
-
-    # --- AI ANALYSIS ---
-    if model:
-        st.divider()
-        st.subheader("🤖 AI Stock Decoder")
-        col1, col2 = st.columns([1, 3])
-        with col1:
-            ticker_input = st.text_input("Analyze Ticker (e.g. TCS)", "").upper()
-            analyze_btn = st.button("Decode with AI")
-        
-        with col2:
-            if analyze_btn and ticker_input:
-                stock_data = data[data['SYMBOL'] == ticker_input]
-                if not stock_data.empty:
-                    del_val = stock_data[target_col].iloc[0]
-                    prompt = (f"The stock {ticker_input} has a delivery percentage of {del_val}%. "
-                              "Is this considered high accumulation? What does it mean for a swing trader?")
-                    with st.spinner("AI thinking..."):
-                        response = model.generate_content(prompt)
-                        st.markdown(response.text)
+    # --- AI ANALYSIS SECTION ---
+    st.divider()
+    st.subheader("🤖 AI Stock Decoder")
+    
+    col1, col2 = st.columns([1, 4])
+    with col1:
+        ticker_input = st.text_input("Enter Ticker (e.g. TCS)", "").upper().strip()
+        analyze_btn = st.button("Decode with AI")
+    
+    with col2:
+        if analyze_btn and ticker_input:
+            if not model:
+                st.error("AI Model is not connected. Check API Key.")
+            else:
+                # Find data for this ticker
+                stock_row = data[data['SYMBOL'] == ticker_input]
+                
+                if not stock_row.empty:
+                    del_per = stock_row[target_col].iloc[0]
+                    price = stock_row['CLOSE_PRICE'].iloc[0] if 'CLOSE_PRICE' in stock_row else "N/A"
+                    
+                    prompt = (
+                        f"Analyze the Indian stock {ticker_input}. "
+                        f"It has a very high Delivery Percentage of {del_per}% at a price of {price}. "
+                        "Explain to a beginner investor: Does this indicate 'Smart Money' accumulation? "
+                        "What are the risks? Keep it short and professional."
+                    )
+                    
+                    with st.spinner(f"AI is analyzing {ticker_input}..."):
+                        try:
+                            response = model.generate_content(prompt)
+                            st.markdown(response.text)
+                        except Exception as e:
+                            st.error(f"AI Error: {e}")
                 else:
-                    st.warning("Ticker not found in today's list.")
+                    st.warning(f"Ticker '{ticker_input}' not found in today's list.")
