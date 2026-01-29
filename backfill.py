@@ -8,7 +8,7 @@ from googleapiclient.http import MediaIoBaseUpload
 import io
 import os
 
-# --- AUTHENTICATION (Using Github Secrets) ---
+# --- AUTHENTICATION ---
 service_account_info = eval(os.environ["GCP_SERVICE_ACCOUNT"])
 creds = service_account.Credentials.from_service_account_info(
     service_account_info,
@@ -33,10 +33,8 @@ while current_date <= today:
         print(f"Fetching: {date_str}...", end=" ")
         
         try:
-            # Download Data
-            df = capital_market.price_volume_and_deliverable_position_data(
-                symbol="", period="", from_date=date_str, to_date=date_str
-            )
+            # FIX: Using 'bhav_copy_with_delivery' specifically for single-day dumps
+            df = capital_market.bhav_copy_with_delivery(date_str)
             
             if df is not None and not df.empty:
                 # Add a Date Column (Crucial for history)
@@ -49,7 +47,8 @@ while current_date <= today:
                 print("❌ No Data (Holiday?)")
                 
         except Exception as e:
-            print(f"⚠️ Error: {e}")
+            # Short error message to keep logs clean
+            print(f"⚠️ Skipped: {e}")
             
         # Sleep to avoid getting blocked by NSE
         time.sleep(1) 
@@ -76,12 +75,31 @@ if not full_data.empty:
     
     media = MediaIoBaseUpload(csv_buffer, mimetype='text/csv', resumable=True)
     
-    drive_service.files().create(
-        body=file_metadata,
-        media_body=media,
-        fields='id'
-    ).execute()
-    
-    print("🚀 SUCCESS! History File Created in Drive.")
+    # First, try to find existing file to overwrite (to avoid duplicates)
+    try:
+        query = "name = 'nse_history_data.csv' and trashed = false"
+        results = drive_service.files().list(q=query, fields="files(id)").execute()
+        files = results.get('files', [])
+        
+        if files:
+            # Update existing file
+            file_id = files[0]['id']
+            drive_service.files().update(
+                fileId=file_id,
+                media_body=media
+            ).execute()
+            print("🚀 SUCCESS! Existing History File Updated.")
+        else:
+            # Create new file
+            drive_service.files().create(
+                body=file_metadata,
+                media_body=media,
+                fields='id'
+            ).execute()
+            print("🚀 SUCCESS! New History File Created.")
+            
+    except Exception as e:
+        print(f"Upload Error: {e}")
+
 else:
     print("⚠️ No data was collected.")
