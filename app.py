@@ -130,12 +130,10 @@ def get_fundamentals(ticker):
         }
     except: return None
 
-# --- SECTOR FINDER (ON THE FLY) ---
 @st.cache_data(ttl=86400)
 def get_sector_for_list(ticker_list):
-    # This function fetches sectors for a batch of stocks to show accumulation zones
     sector_map = {}
-    for t in ticker_list[:15]: # Limit to top 15 to stay fast
+    for t in ticker_list[:15]: 
         try:
             s = yf.Ticker(f"{t}.NS").info.get('sector', 'Others')
             sector_map[t] = s
@@ -162,66 +160,72 @@ if not daily_deliv_col: daily_deliv_col = next((c for c in daily_data.columns if
 if daily_deliv_col:
     daily_data[daily_deliv_col] = pd.to_numeric(daily_data[daily_deliv_col], errors='coerce').fillna(0)
     
-    # --- NEW: TIMEFRAME CALCULATOR ---
-    # We calculate the average delivery based on selected timeframe
+    # --- UI HEADER & TIMEFRAME SELECTION (MOVED TO MAIN AREA) ---
+    col_title, col_time = st.columns([2, 1])
     
-    st.sidebar.header("⏳ Timeframe Selector")
-    timeframe = st.sidebar.selectbox("Analyze Accumulation Over:", ["Last 1 Day", "Last 1 Week", "Last 1 Month"])
+    with col_title:
+        st.write("") # Spacer
+
+    with col_time:
+        # THE DROPDOWN YOU WANTED
+        timeframe = st.selectbox(
+            "⏳ Analyze Over:",
+            ["Last 1 Day", "Last 1 Week", "Last 1 Month"],
+            index=0
+        )
     
     analysis_df = pd.DataFrame()
+    data_source_msg = ""
     
     if timeframe == "Last 1 Day":
-        # Use Daily Data directly
         analysis_df = daily_data.copy()
         analysis_df['Avg_Delivery'] = analysis_df[daily_deliv_col]
+        data_source_msg = "Using Today's Live Data"
         
     elif history_data is not None:
-        # Process History Data
-        # Ensure Date sorting
         hist_sorted = history_data.sort_values(['SYMBOL', 'Trade_Date'])
+        
+        # Check available dates in history
+        unique_dates = hist_sorted['Trade_Date'].nunique()
+        min_date = hist_sorted['Trade_Date'].min().date()
+        max_date = hist_sorted['Trade_Date'].max().date()
         
         days = 5 if timeframe == "Last 1 Week" else 20
         
-        # Calculate Mean of last N days per symbol
-        # We take the last N rows for each symbol
         grouped = hist_sorted.groupby('SYMBOL').tail(days).groupby('SYMBOL')[['DELIV_PER', 'CLOSE_PRICE']].mean().reset_index()
         grouped.rename(columns={'DELIV_PER': 'Avg_Delivery', 'CLOSE_PRICE': 'Avg_Price'}, inplace=True)
         analysis_df = grouped
+        
+        data_source_msg = f"Based on {unique_dates} days of data ({min_date} to {max_date})"
+        if unique_dates < 2:
+            st.warning(f"⚠️ Note: History file only contains {unique_dates} day(s) of data. 'Week/Month' view will look same as 'Day' view until more data accumulates.")
     else:
-        st.warning("History data needed for Week/Month analysis. Using Daily data for now.")
+        st.warning("History data unavailable. Switching to Daily View.")
         analysis_df = daily_data.copy()
         analysis_df['Avg_Delivery'] = analysis_df[daily_deliv_col]
 
-    # --- STRICT FILTRATION (THE 80-98 RULE) ---
-    # Filter: Delivery must be >= 80 AND <= 98 (Removing noise)
-    
+    # --- STRICT FILTRATION (80-98%) ---
     filtered_df = analysis_df[
         (analysis_df['Avg_Delivery'] >= 80) & 
         (analysis_df['Avg_Delivery'] <= 98)
     ].sort_values('Avg_Delivery', ascending=False)
     
-    # Format for display
     display_cols = ['SYMBOL', 'Avg_Delivery']
     if 'CLOSE_PRICE' in analysis_df.columns: 
         display_cols.insert(1, 'CLOSE_PRICE')
     elif 'Avg_Price' in analysis_df.columns:
         display_cols.insert(1, 'Avg_Price')
-        
-    # --- UI LAYOUT ---
-    
-    # 1. SECTOR INSIGHTS (Top Accumulating Sectors)
+
+    # --- SECTOR INSIGHTS ---
     st.subheader(f"🏆 Top Accumulation Zones ({timeframe})")
+    st.caption(f"ℹ️ {data_source_msg}") # Shows exactly what data is being used
+    
     if not filtered_df.empty:
         top_tickers = filtered_df.head(10)['SYMBOL'].tolist()
-        
-        # Fetch Sectors for these top winners
-        with st.spinner("Identifying Sectors of Top Stocks..."):
+        with st.spinner("Identifying Sectors..."):
             sector_map = get_sector_for_list(top_tickers)
-            
-        # Count Sectors
         sector_counts = pd.Series(sector_map.values()).value_counts()
         
-        # Display as metric cards
         s_cols = st.columns(min(4, len(sector_counts)))
         for i, (sec, count) in enumerate(sector_counts.items()):
             if i < 4:
@@ -231,28 +235,28 @@ if daily_deliv_col:
 
     st.divider()
 
-    # 2. THE FILTERED LIST (Interactive)
+    # --- FILTERED LIST (INTERACTIVE) ---
     st.subheader(f"💎 High Quality Accumulation (80% - 98%)")
-    st.caption(f"Showing stocks with consistent high delivery over {timeframe}. ETFs and 100% noise excluded.")
     
-    # Interactive Table
+    # We use a unique key based on timeframe to force refresh when timeframe changes
+    table_key = f"acc_table_{timeframe.replace(' ','_')}"
+    
     event = st.dataframe(
         filtered_df[display_cols].style.format({"Avg_Delivery": "{:.2f}%", "CLOSE_PRICE": "₹{:.2f}", "Avg_Price": "₹{:.2f}"}),
         use_container_width=True,
         hide_index=True,
         on_select="rerun",
         selection_mode="single-row",
-        key="accumulation_table"
+        key=table_key
     )
     
-    # Handle Click
     if len(event.selection.rows) > 0:
         idx = event.selection.rows[0]
         st.session_state.search_ticker = filtered_df.iloc[idx]['SYMBOL']
 
     st.divider()
 
-    # --- STOCK ANALYZER (SEARCH BAR) ---
+    # --- ANALYZER ---
     st.subheader("🔍 Deep Dive Analyzer")
     col_search, col_stats = st.columns([1, 3])
     
@@ -260,22 +264,16 @@ if daily_deliv_col:
         search_ticker = st.text_input("Enter Ticker", key="search_ticker").upper().strip()
 
     if search_ticker:
-        # Fetch fresh data for the selected stock
         row = daily_data[daily_data['SYMBOL'] == search_ticker]
-        
-        # Technical Stats
         if not row.empty:
             val = row[daily_deliv_col].iloc[0]
             price = row['CLOSE_PRICE'].iloc[0] if 'CLOSE_PRICE' in daily_data.columns else "-"
-            
             if val > 80: color_txt = "green"
             elif val > 60: color_txt = "orange"
             else: color_txt = "red"
-            
             with col_stats:
                 st.markdown(f"### Today: ₹{price} | Delivery: :{color_txt}[{val}%]")
         
-        # Fundamental Check
         with st.expander(f"📊 Fundamental Health Check: {search_ticker}", expanded=True):
             fund_data = get_fundamentals(search_ticker)
             if fund_data:
@@ -293,7 +291,6 @@ if daily_deliv_col:
             else:
                 st.info("Fundamental data not available.")
 
-        # History Chart
         if history_data is not None:
             if 'Trade_Date' in history_data.columns and 'DELIV_PER' in history_data.columns:
                 stock_hist = history_data[history_data['SYMBOL'] == search_ticker].sort_values('Trade_Date')
@@ -316,7 +313,6 @@ if daily_deliv_col:
             else: st.error(f"Missing Columns in History.")
         else: st.info("Loading history file...")
 
-    # AI Analysis
     st.divider()
     if st.button("Analyze Current Ticker") and search_ticker and model:
         row = daily_data[daily_data['SYMBOL'] == search_ticker]
