@@ -9,33 +9,36 @@ import io
 st.set_page_config(page_title="Vivek's Pro Dashboard", layout="wide")
 st.title("📡 NSE Daily Scanner (Drive Connected)")
 
-# --- 1. ROBUST AI SETUP (Self-Healing) ---
+# --- 1. ROBUST AI SETUP (The Fix) ---
 model = None
 try:
     if "GEMINI_API_KEY" in st.secrets:
         genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
         
-        # Ask Google: "What models do you have?"
-        available_models = []
+        # 1. Try to use the newest Flash model directly
         try:
+            test_model = genai.GenerativeModel('gemini-1.5-flash')
+            # Light test to see if it connects
+            test_model.generate_content("test") 
+            model = test_model
+            # st.toast("✅ Connected to Gemini 1.5 Flash")
+        except:
+            # 2. If Flash fails, list available models and pick the first one
+            available_models = []
             for m in genai.list_models():
                 if 'generateContent' in m.supported_generation_methods:
                     available_models.append(m.name)
-        except:
-            pass # If listing fails, we will try defaults
             
-        # Smart Selection Logic
-        target_model = "models/gemini-pro" # Default safe option
-        if 'models/gemini-1.5-flash' in available_models:
-            target_model = 'models/gemini-1.5-flash'
-        elif 'models/gemini-1.5-pro' in available_models:
-            target_model = 'models/gemini-1.5-pro'
-            
-        model = genai.GenerativeModel(target_model)
+            if available_models:
+                target_model = available_models[0] # Just pick the first working one
+                model = genai.GenerativeModel(target_model)
+                # st.toast(f"✅ Connected to fallback model: {target_model}")
+            else:
+                st.error("⚠️ AI Error: No available models found for this API Key.")
     else:
         st.warning("⚠️ AI Key missing. Check 'GEMINI_API_KEY' in secrets.")
 except Exception as e:
-    st.warning(f"AI functionality disabled due to error: {e}")
+    st.warning(f"AI functionality disabled: {e}")
 
 # --- 2. SETUP GOOGLE DRIVE ---
 try:
@@ -79,9 +82,6 @@ with st.spinner("Accessing Cloud Database..."):
 if data is None:
     st.error("❌ Data file not found. Please run the GitHub Action.")
 else:
-    # Success Message
-    st.success(f"✅ Market Data Loaded Successfully! ({len(data)} stocks)")
-    
     # Cleaning
     data.columns = [c.replace('"', '').strip() for c in data.columns]
     
@@ -95,8 +95,8 @@ else:
         data[target_col] = pd.to_numeric(data[target_col], errors='coerce').fillna(0)
         
         # --- BUCKETS ---
-        st.divider()
-        tab1, tab2, tab3 = st.tabs(["🔥 Strong Buying (>80%)", "💎 Accumulation (60-80%)", "⚠️ Weak (<40%)"])
+        st.subheader("📊 Delivery Analysis")
+        tab1, tab2, tab3 = st.tabs(["🔥 Strong (>80%)", "💎 Accumulation (60-80%)", "⚠️ Weak (<40%)"])
         
         cols = ['SYMBOL', 'CLOSE_PRICE', target_col]
         
