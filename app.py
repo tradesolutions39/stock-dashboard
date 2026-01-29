@@ -9,7 +9,7 @@ import yfinance as yf
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Vivek's Pro Dashboard", layout="wide")
-st.title("📡 NSE Daily Scanner + Fundamentals")
+st.title("📡 NSE Smart Accumulation Scanner")
 
 # --- INITIALIZE STATE ---
 if "search_ticker" not in st.session_state:
@@ -130,9 +130,20 @@ def get_fundamentals(ticker):
         }
     except: return None
 
-# --- 3. LOGIC PHASE (BEFORE UI) ---
-# We load and prepare data first so we can check clicks BEFORE drawing the search bar.
+# --- SECTOR FINDER (ON THE FLY) ---
+@st.cache_data(ttl=86400)
+def get_sector_for_list(ticker_list):
+    # This function fetches sectors for a batch of stocks to show accumulation zones
+    sector_map = {}
+    for t in ticker_list[:15]: # Limit to top 15 to stay fast
+        try:
+            s = yf.Ticker(f"{t}.NS").info.get('sector', 'Others')
+            sector_map[t] = s
+        except:
+            sector_map[t] = 'Unknown'
+    return sector_map
 
+# --- DATA PREP ---
 if st.sidebar.button("🛠️ Reset/Refresh Data"):
     st.cache_data.clear()
     st.rerun()
@@ -150,50 +161,109 @@ if not daily_deliv_col: daily_deliv_col = next((c for c in daily_data.columns if
 
 if daily_deliv_col:
     daily_data[daily_deliv_col] = pd.to_numeric(daily_data[daily_deliv_col], errors='coerce').fillna(0)
-
-    # PREPARE DATAFRAMES FOR SCANNER (We need these now to map clicks)
-    cols = ['SYMBOL', 'CLOSE_PRICE', daily_deliv_col]
-    cols = [c for c in cols if c in daily_data.columns]
     
-    df_clean = daily_data[daily_data[daily_deliv_col] < 99.9]
+    # --- NEW: TIMEFRAME CALCULATOR ---
+    # We calculate the average delivery based on selected timeframe
     
-    # Sort them EXACTLY as they will appear in the UI
-    df_high = df_clean[df_clean[daily_deliv_col] >= 80].sort_values(daily_deliv_col, ascending=False)
-    df_med = df_clean[(df_clean[daily_deliv_col] >= 60) & (df_clean[daily_deliv_col] < 80)].sort_values(daily_deliv_col, ascending=False)
-    df_low = df_clean[df_clean[daily_deliv_col] < 40].sort_values(daily_deliv_col, ascending=True)
-
-    # --- CLICK HANDLER (CRITICAL FIX) ---
-    # Check if any table in session state has a selection
-    # Since we use on_select="rerun", this code runs immediately after a click
+    st.sidebar.header("⏳ Timeframe Selector")
+    timeframe = st.sidebar.selectbox("Analyze Accumulation Over:", ["Last 1 Day", "Last 1 Week", "Last 1 Month"])
     
-    # Check High Tab Click
-    if "tab_high" in st.session_state and st.session_state.tab_high.get("selection", {}).get("rows"):
-        idx = st.session_state.tab_high["selection"]["rows"][0]
-        st.session_state.search_ticker = df_high.iloc[idx]['SYMBOL']
-
-    # Check Medium Tab Click
-    elif "tab_med" in st.session_state and st.session_state.tab_med.get("selection", {}).get("rows"):
-        idx = st.session_state.tab_med["selection"]["rows"][0]
-        st.session_state.search_ticker = df_med.iloc[idx]['SYMBOL']
+    analysis_df = pd.DataFrame()
+    
+    if timeframe == "Last 1 Day":
+        # Use Daily Data directly
+        analysis_df = daily_data.copy()
+        analysis_df['Avg_Delivery'] = analysis_df[daily_deliv_col]
         
-    # Check Low Tab Click
-    elif "tab_low" in st.session_state and st.session_state.tab_low.get("selection", {}).get("rows"):
-        idx = st.session_state.tab_low["selection"]["rows"][0]
-        st.session_state.search_ticker = df_low.iloc[idx]['SYMBOL']
+    elif history_data is not None:
+        # Process History Data
+        # Ensure Date sorting
+        hist_sorted = history_data.sort_values(['SYMBOL', 'Trade_Date'])
+        
+        days = 5 if timeframe == "Last 1 Week" else 20
+        
+        # Calculate Mean of last N days per symbol
+        # We take the last N rows for each symbol
+        grouped = hist_sorted.groupby('SYMBOL').tail(days).groupby('SYMBOL')[['DELIV_PER', 'CLOSE_PRICE']].mean().reset_index()
+        grouped.rename(columns={'DELIV_PER': 'Avg_Delivery', 'CLOSE_PRICE': 'Avg_Price'}, inplace=True)
+        analysis_df = grouped
+    else:
+        st.warning("History data needed for Week/Month analysis. Using Daily data for now.")
+        analysis_df = daily_data.copy()
+        analysis_df['Avg_Delivery'] = analysis_df[daily_deliv_col]
 
-    # --- UI PHASE ---
+    # --- STRICT FILTRATION (THE 80-98 RULE) ---
+    # Filter: Delivery must be >= 80 AND <= 98 (Removing noise)
     
-    st.subheader("🔍 Smart Stock Analyzer")
+    filtered_df = analysis_df[
+        (analysis_df['Avg_Delivery'] >= 80) & 
+        (analysis_df['Avg_Delivery'] <= 98)
+    ].sort_values('Avg_Delivery', ascending=False)
+    
+    # Format for display
+    display_cols = ['SYMBOL', 'Avg_Delivery']
+    if 'CLOSE_PRICE' in analysis_df.columns: 
+        display_cols.insert(1, 'CLOSE_PRICE')
+    elif 'Avg_Price' in analysis_df.columns:
+        display_cols.insert(1, 'Avg_Price')
+        
+    # --- UI LAYOUT ---
+    
+    # 1. SECTOR INSIGHTS (Top Accumulating Sectors)
+    st.subheader(f"🏆 Top Accumulation Zones ({timeframe})")
+    if not filtered_df.empty:
+        top_tickers = filtered_df.head(10)['SYMBOL'].tolist()
+        
+        # Fetch Sectors for these top winners
+        with st.spinner("Identifying Sectors of Top Stocks..."):
+            sector_map = get_sector_for_list(top_tickers)
+            
+        # Count Sectors
+        sector_counts = pd.Series(sector_map.values()).value_counts()
+        
+        # Display as metric cards
+        s_cols = st.columns(min(4, len(sector_counts)))
+        for i, (sec, count) in enumerate(sector_counts.items()):
+            if i < 4:
+                s_cols[i].metric(label="Dominant Sector", value=sec, delta=f"{count} Stocks")
+    else:
+        st.info("No stocks matched the 80-98% criteria for this period.")
+
+    st.divider()
+
+    # 2. THE FILTERED LIST (Interactive)
+    st.subheader(f"💎 High Quality Accumulation (80% - 98%)")
+    st.caption(f"Showing stocks with consistent high delivery over {timeframe}. ETFs and 100% noise excluded.")
+    
+    # Interactive Table
+    event = st.dataframe(
+        filtered_df[display_cols].style.format({"Avg_Delivery": "{:.2f}%", "CLOSE_PRICE": "₹{:.2f}", "Avg_Price": "₹{:.2f}"}),
+        use_container_width=True,
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        key="accumulation_table"
+    )
+    
+    # Handle Click
+    if len(event.selection.rows) > 0:
+        idx = event.selection.rows[0]
+        st.session_state.search_ticker = filtered_df.iloc[idx]['SYMBOL']
+
+    st.divider()
+
+    # --- STOCK ANALYZER (SEARCH BAR) ---
+    st.subheader("🔍 Deep Dive Analyzer")
     col_search, col_stats = st.columns([1, 3])
     
     with col_search:
-        # The key="search_ticker" will now be pre-filled with the click value if it exists
         search_ticker = st.text_input("Enter Ticker", key="search_ticker").upper().strip()
 
     if search_ticker:
+        # Fetch fresh data for the selected stock
         row = daily_data[daily_data['SYMBOL'] == search_ticker]
         
-        # 1. Technical Stats
+        # Technical Stats
         if not row.empty:
             val = row[daily_deliv_col].iloc[0]
             price = row['CLOSE_PRICE'].iloc[0] if 'CLOSE_PRICE' in daily_data.columns else "-"
@@ -205,28 +275,25 @@ if daily_deliv_col:
             with col_stats:
                 st.markdown(f"### Today: ₹{price} | Delivery: :{color_txt}[{val}%]")
         
-        # 2. FUNDAMENTAL HEALTH CHECK
+        # Fundamental Check
         with st.expander(f"📊 Fundamental Health Check: {search_ticker}", expanded=True):
             fund_data = get_fundamentals(search_ticker)
             if fund_data:
                 c1, c2, c3, c4 = st.columns(4)
                 pe = fund_data['PE Ratio']
-                pe_color = "green" if pe and pe < 25 else "red"
-                c1.metric("PE Ratio", f"{round(pe, 2)}" if pe else "N/A", delta_color="inverse")
-                roe = fund_data['ROE']
-                c2.metric("ROE", f"{round(roe * 100, 2)}%" if roe else "N/A")
+                c1.metric("PE Ratio", f"{round(pe, 2)}" if pe else "N/A")
+                c2.metric("ROE", f"{round(fund_data['ROE'] * 100, 2)}%" if fund_data['ROE'] else "N/A")
                 c3.metric("Market Cap", f"₹{int(fund_data['Market Cap (Cr)'])} Cr")
                 c4.metric("Sector", fund_data['Sector'])
                 st.divider()
-                st.caption("Year-on-Year Growth Trends")
                 g1, g2, g3 = st.columns(3)
                 g1.metric("Sales Growth", fund_data['Sales Trend'])
                 g2.metric("OPM (Margins)", fund_data['OPM Trend'])
                 g3.metric("EPS (Profit)", fund_data['EPS Trend'])
             else:
-                st.info("Fundamental data not available (Check yfinance connection).")
+                st.info("Fundamental data not available.")
 
-        # 3. History Chart
+        # History Chart
         if history_data is not None:
             if 'Trade_Date' in history_data.columns and 'DELIV_PER' in history_data.columns:
                 stock_hist = history_data[history_data['SYMBOL'] == search_ticker].sort_values('Trade_Date')
@@ -249,25 +316,8 @@ if daily_deliv_col:
             else: st.error(f"Missing Columns in History.")
         else: st.info("Loading history file...")
 
-    # --- SCANNER (INTERACTIVE) ---
+    # AI Analysis
     st.divider()
-    st.subheader("📊 Select Stock from Scanner")
-    st.caption("👆 Click on any row to analyze.")
-    
-    tab1, tab2, tab3 = st.tabs(["🔥 High (80-99%)", "💎 Medium (60-80%)", "⚠️ Low (<40%)"])
-    
-    # We pass the PREPARED dataframes here
-    # The key matches the session state keys we checked at the top
-    with tab1:
-        st.dataframe(df_high[cols], use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row", key="tab_high")
-    with tab2:
-        st.dataframe(df_med[cols], use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row", key="tab_med")
-    with tab3:
-        st.dataframe(df_low[cols], use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row", key="tab_low")
-
-    # --- AI ANALYSIS ---
-    st.divider()
-    st.subheader("🤖 AI Analysis")
     if st.button("Analyze Current Ticker") and search_ticker and model:
         row = daily_data[daily_data['SYMBOL'] == search_ticker]
         if not row.empty:
