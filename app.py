@@ -160,19 +160,11 @@ if not daily_deliv_col: daily_deliv_col = next((c for c in daily_data.columns if
 if daily_deliv_col:
     daily_data[daily_deliv_col] = pd.to_numeric(daily_data[daily_deliv_col], errors='coerce').fillna(0)
     
-    # --- UI HEADER & TIMEFRAME SELECTION (MOVED TO MAIN AREA) ---
     col_title, col_time = st.columns([2, 1])
-    
     with col_title:
-        st.write("") # Spacer
-
+        st.write("") 
     with col_time:
-        # THE DROPDOWN YOU WANTED
-        timeframe = st.selectbox(
-            "⏳ Analyze Over:",
-            ["Last 1 Day", "Last 1 Week", "Last 1 Month"],
-            index=0
-        )
+        timeframe = st.selectbox("⏳ Analyze Over:", ["Last 1 Day", "Last 1 Week", "Last 1 Month"], index=0)
     
     analysis_df = pd.DataFrame()
     data_source_msg = ""
@@ -185,20 +177,28 @@ if daily_deliv_col:
     elif history_data is not None:
         hist_sorted = history_data.sort_values(['SYMBOL', 'Trade_Date'])
         
-        # Check available dates in history
+        # --- FIX: CONVERT TO NUMERIC BEFORE MATH ---
+        # This prevents the TypeError by turning non-numeric text into NaN (and ignoring it)
+        cols_to_clean = ['DELIV_PER', 'CLOSE_PRICE']
+        for col in cols_to_clean:
+            if col in hist_sorted.columns:
+                hist_sorted[col] = pd.to_numeric(hist_sorted[col], errors='coerce')
+        # -------------------------------------------
+
         unique_dates = hist_sorted['Trade_Date'].nunique()
         min_date = hist_sorted['Trade_Date'].min().date()
         max_date = hist_sorted['Trade_Date'].max().date()
         
         days = 5 if timeframe == "Last 1 Week" else 20
         
+        # Now groupby will work safely
         grouped = hist_sorted.groupby('SYMBOL').tail(days).groupby('SYMBOL')[['DELIV_PER', 'CLOSE_PRICE']].mean().reset_index()
         grouped.rename(columns={'DELIV_PER': 'Avg_Delivery', 'CLOSE_PRICE': 'Avg_Price'}, inplace=True)
         analysis_df = grouped
         
         data_source_msg = f"Based on {unique_dates} days of data ({min_date} to {max_date})"
         if unique_dates < 2:
-            st.warning(f"⚠️ Note: History file only contains {unique_dates} day(s) of data. 'Week/Month' view will look same as 'Day' view until more data accumulates.")
+            st.warning(f"⚠️ Note: History file only contains {unique_dates} day(s) of data.")
     else:
         st.warning("History data unavailable. Switching to Daily View.")
         analysis_df = daily_data.copy()
@@ -218,7 +218,7 @@ if daily_deliv_col:
 
     # --- SECTOR INSIGHTS ---
     st.subheader(f"🏆 Top Accumulation Zones ({timeframe})")
-    st.caption(f"ℹ️ {data_source_msg}") # Shows exactly what data is being used
+    st.caption(f"ℹ️ {data_source_msg}")
     
     if not filtered_df.empty:
         top_tickers = filtered_df.head(10)['SYMBOL'].tolist()
@@ -238,7 +238,6 @@ if daily_deliv_col:
     # --- FILTERED LIST (INTERACTIVE) ---
     st.subheader(f"💎 High Quality Accumulation (80% - 98%)")
     
-    # We use a unique key based on timeframe to force refresh when timeframe changes
     table_key = f"acc_table_{timeframe.replace(' ','_')}"
     
     event = st.dataframe(
@@ -295,11 +294,14 @@ if daily_deliv_col:
             if 'Trade_Date' in history_data.columns and 'DELIV_PER' in history_data.columns:
                 stock_hist = history_data[history_data['SYMBOL'] == search_ticker].sort_values('Trade_Date')
                 if not stock_hist.empty:
+                    # Clean History for Chart as well
                     stock_hist['DELIV_PER'] = pd.to_numeric(stock_hist['DELIV_PER'], errors='coerce')
                     stock_hist['CLOSE_PRICE'] = pd.to_numeric(stock_hist['CLOSE_PRICE'], errors='coerce')
+                    
                     colors = []
                     for x in stock_hist['DELIV_PER']:
-                        if x >= 80: colors.append('rgba(0, 100, 0, 0.8)')
+                        if pd.isna(x): colors.append('rgba(0,0,0,0)') # Handle NaNs
+                        elif x >= 80: colors.append('rgba(0, 100, 0, 0.8)')
                         elif x >= 60: colors.append('rgba(50, 205, 50, 0.7)')
                         elif x >= 40: colors.append('rgba(128, 128, 128, 0.6)')
                         else: colors.append('rgba(255, 0, 0, 0.6)')
