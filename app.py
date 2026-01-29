@@ -8,7 +8,7 @@ import google.generativeai as genai
 try:
     if "GEMINI_API_KEY" in st.secrets:
         genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-        model = genai.GenerativeModel('gemini-pro') 
+        model = genai.GenerativeModel('gemini-1.5-flash') 
     else:
         st.error("⚠️ AI Key missing. Please check Streamlit Secrets.")
 except Exception as e:
