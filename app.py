@@ -56,8 +56,27 @@ def find_delivery_column(df):
     for c in df.columns:
         if "DELIV" in c and ("PER" in c or "%" in c):
             return c
-            
     return None
+
+def standardize_date_column(df):
+    # Normalize headers first
+    df.columns = [str(c).replace('"', '').strip() for c in df.columns]
+    
+    # List of possible date column names from NSE
+    candidates = ['Trade_Date', 'DATE1', 'TRADEDDATE', 'Date', 'TIMESTAMP', 'date']
+    
+    found_col = None
+    for col in df.columns:
+        if col in candidates or col.upper() in [c.upper() for c in candidates]:
+            found_col = col
+            break
+    
+    if found_col:
+        df.rename(columns={found_col: 'Trade_Date'}, inplace=True)
+        # Convert to datetime object
+        df['Trade_Date'] = pd.to_datetime(df['Trade_Date'], errors='coerce')
+        return True
+    return False
 
 # --- 3. LOAD DATA FUNCTIONS ---
 @st.cache_data(ttl=3600)
@@ -87,20 +106,12 @@ def load_history_data():
         request = drive_service.files().get_media(fileId=file_id)
         downloaded = io.BytesIO(request.execute())
         
-        # Optimize: Read distinct columns only if file is huge, but here we read all
         df = pd.read_csv(downloaded)
         
-        # Standardize Date Column immediately
-        # Backfill script uses 'Trade_Date', NSE raw uses 'DATE1' or 'TRADEDDATE'
-        date_cols = ['Trade_Date', 'DATE1', 'TRADEDDATE', 'Date']
-        for d in date_cols:
-            # Check case-insensitive
-            match = next((c for c in df.columns if c.lower() == d.lower()), None)
-            if match:
-                df['Trade_Date'] = pd.to_datetime(df[match])
-                break
-                
-        return df
+        # FIX: Ensure Date Column exists and is named 'Trade_Date'
+        success = standardize_date_column(df)
+        
+        return df if success else None
     except:
         return None
 
@@ -141,7 +152,7 @@ if daily_col:
             else:
                 st.warning(f"Ticker '{search_ticker}' not found in today's active list.")
 
-        # B. Show Historical Chart (THE FIX IS HERE)
+        # B. Show Historical Chart (FIXED)
         if history_data is not None:
             # Filter for Stock
             stock_hist = history_data[history_data['SYMBOL'] == search_ticker].copy()
@@ -169,15 +180,15 @@ if daily_col:
                     ))
 
                     # Line Chart (Price)
-                    # Find Close Price column carefully
-                    price_col = next((c for c in stock_hist.columns if "CLOSE" in c), "CLOSE_PRICE")
+                    price_col = next((c for c in stock_hist.columns if "CLOSE" in c), None)
                     
-                    fig.add_trace(go.Scatter(
-                        x=stock_hist['Trade_Date'],
-                        y=stock_hist[price_col],
-                        name='Price',
-                        line=dict(color='rgb(0, 0, 0)', width=2)
-                    ))
+                    if price_col:
+                        fig.add_trace(go.Scatter(
+                            x=stock_hist['Trade_Date'],
+                            y=stock_hist[price_col],
+                            name='Price',
+                            line=dict(color='rgb(0, 0, 0)', width=2)
+                        ))
 
                     # Layout
                     fig.update_layout(
@@ -189,11 +200,11 @@ if daily_col:
                     )
                     st.plotly_chart(fig, use_container_width=True)
                 else:
-                    st.warning(f"Could not find Delivery Column in history file. Available: {list(stock_hist.columns)}")
+                    st.warning(f"Could not find Delivery Column in history file.")
             else:
                 st.info(f"No historical data found for {search_ticker}. (Check if backfill completed)")
         else:
-            st.warning("History file is loading... (First run might take time)")
+            st.warning("History file is loading... (Or Date column is missing)")
 
     # --- UI SECTION 2: SCANNER ---
     st.divider()
@@ -201,7 +212,6 @@ if daily_col:
     
     tab1, tab2, tab3 = st.tabs(["🔥 Strong (>80%)", "💎 Accumulation (60-80%)", "⚠️ Weak (<40%)"])
     
-    # Safe Column Selection
     cols_to_show = ['SYMBOL', 'CLOSE_PRICE', daily_col]
     cols_to_show = [c for c in cols_to_show if c in daily_data.columns]
     
