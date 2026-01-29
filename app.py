@@ -43,33 +43,45 @@ except Exception as e:
 
 # --- HELPER: ROBUST COLUMN FINDER ---
 def find_delivery_column(df):
+    # Normalize headers
     df.columns = [str(c).replace('"', '').strip().upper() for c in df.columns]
-    priorities = ["%DLYQTTO TRADEDQTY", "DELIV_PER", "PCT_DELIV", "DELIVERY_PER", "DELIV_QTY"] # Added DELIV_QTY as fallback
+    
+    # List of known delivery column names
+    priorities = ["%DLYQTTO TRADEDQTY", "DELIV_PER", "PCT_DELIV", "DELIVERY_PER", "DELIV_QTY", "DELIVERY %"] 
     for p in priorities:
         if p in df.columns:
             return p
+            
+    # Fuzzy search
     for c in df.columns:
         if "DELIV" in c and ("PER" in c or "%" in c):
             return c
     return None
 
 def standardize_date_column(df):
+    # Normalize headers
     df.columns = [str(c).replace('"', '').strip() for c in df.columns]
+    
+    # List of known date column names
     candidates = ['Trade_Date', 'DATE1', 'TRADEDDATE', 'Date', 'TIMESTAMP', 'date']
     
     found_col = None
     for col in df.columns:
+        # Case insensitive match
         if col in candidates or col.upper() in [c.upper() for c in candidates]:
             found_col = col
             break
     
     if found_col:
         df.rename(columns={found_col: 'Trade_Date'}, inplace=True)
+        # Force conversion to datetime, ignore errors
         df['Trade_Date'] = pd.to_datetime(df['Trade_Date'], errors='coerce')
         return True
     return False
 
-# --- 3. LOAD DATA FUNCTIONS (WITH CACHE CLEARING) ---
+# --- 3. DATA LOADING (DEBUG MODE ENABLED) ---
+
+# Sidebar Reset Button (Crucial for 77MB file caching issues)
 if st.sidebar.button("🛠️ Reset/Refresh Data"):
     st.cache_data.clear()
     st.rerun()
@@ -89,29 +101,53 @@ def load_daily_data():
     except:
         return None
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=3600, show_spinner="Downloading 77MB History File...")
 def load_history_data():
+    # 1. Find the file
     try:
         query = "name = 'nse_history_data.csv' and trashed = false"
-        results = drive_service.files().list(q=query, fields="files(id, name)").execute()
+        results = drive_service.files().list(q=query, fields="files(id, name, size)").execute()
         files = results.get('files', [])
-        if not files: return None
         
+        if not files:
+            st.error("❌ Error: 'nse_history_data.csv' NOT found in Google Drive.")
+            return None
+            
         file_id = files[0]['id']
+        file_size = files[0].get('size', 'Unknown')
+        # st.toast(f"Found History File (Size: {int(file_size)//1024//1024} MB)") # Optional feedback
+        
+    except Exception as e:
+        st.error(f"❌ Drive Search Error: {e}")
+        return None
+
+    # 2. Download and Parse
+    try:
         request = drive_service.files().get_media(fileId=file_id)
         downloaded = io.BytesIO(request.execute())
         
-        df = pd.read_csv(downloaded)
-        standardize_date_column(df) # Apply fix
+        # KEY FIX for Large Files: low_memory=False prevents mixed-type errors
+        df = pd.read_csv(downloaded, low_memory=False)
+        
+        # Standardize Date immediately
+        if not standardize_date_column(df):
+            st.error(f"❌ Date Column Missing! Found columns: {list(df.columns)}")
+            return None
+            
         return df
-    except:
+        
+    except Exception as e:
+        # THIS IS THE CRITICAL DEBUG MESSAGE
+        st.error(f"❌ CRITICAL LOAD ERROR: {e}")
         return None
 
-# --- 4. MAIN DASHBOARD ---
+# --- 4. MAIN DASHBOARD LOGIC ---
+
 with st.spinner("Syncing with Cloud Database..."):
     daily_data = load_daily_data()
     history_data = load_history_data()
 
+# CHECK DAILY DATA
 if daily_data is None:
     st.error("❌ 'latest_nse_data.csv' not found. Please run the Daily Action.")
     st.stop()
@@ -136,28 +172,38 @@ if daily_col:
             if not today_row.empty:
                 val = today_row[daily_col].iloc[0]
                 price = today_row['CLOSE_PRICE'].iloc[0] if 'CLOSE_PRICE' in daily_data.columns else "-"
+                
                 color = "green" if val > 60 else "orange" if val > 40 else "red"
                 st.markdown(f"### Today: ₹{price} | Delivery: :{color}[{val}%]")
             else:
                 st.warning(f"Ticker '{search_ticker}' not found in today's active list.")
 
-        # B. Show Historical Chart (CRASH PROOF)
+        # B. Show Historical Chart
         if history_data is not None:
-            # Check if columns exist BEFORE filtering
+            # Check if Date column exists (Double Check)
             if 'Trade_Date' not in history_data.columns:
-                st.error(f"⚠️ Date Column missing in History File. Found: {list(history_data.columns)}")
-                st.info("Try clicking 'Reset Data' in sidebar.")
+                st.error("⚠️ History loaded but 'Trade_Date' column is missing.")
             else:
+                # Filter for stock
                 stock_hist = history_data[history_data['SYMBOL'] == search_ticker].copy()
                 
                 if not stock_hist.empty:
                     stock_hist = stock_hist.sort_values('Trade_Date')
+                    
+                    # Find History Delivery Column
                     hist_col = find_delivery_column(stock_hist)
                     
                     if hist_col:
+                        # Ensure numeric
                         stock_hist[hist_col] = pd.to_numeric(stock_hist[hist_col], errors='coerce')
                         
+                        # Find Price Column
+                        price_col = next((c for c in stock_hist.columns if "CLOSE" in c), None)
+                        
+                        # Create Chart
                         fig = go.Figure()
+
+                        # Bar (Delivery)
                         fig.add_trace(go.Bar(
                             x=stock_hist['Trade_Date'],
                             y=stock_hist[hist_col],
@@ -166,7 +212,7 @@ if daily_col:
                             yaxis='y2'
                         ))
 
-                        price_col = next((c for c in stock_hist.columns if "CLOSE" in c), None)
+                        # Line (Price)
                         if price_col:
                             fig.add_trace(go.Scatter(
                                 x=stock_hist['Trade_Date'],
@@ -180,19 +226,22 @@ if daily_col:
                             yaxis=dict(title='Price', side='left'),
                             yaxis2=dict(title='Delivery %', side='right', overlaying='y', range=[0, 100]),
                             legend=dict(x=0, y=1.1, orientation='h'),
-                            height=400
+                            height=400,
+                            hovermode="x unified"
                         )
                         st.plotly_chart(fig, use_container_width=True)
                     else:
-                        st.warning("History file loaded, but Delivery Column not found.")
+                        st.warning(f"Delivery Column not found in history. Available: {list(stock_hist.columns)}")
                 else:
                     st.info(f"No history found for {search_ticker}. The archive might be incomplete.")
         else:
-            st.warning("History file is loading... (If this persists, click 'Reset Data')")
+            # If history_data is None, the error message from load_history_data will be visible above.
+            st.info("Attempting to load history file... Check for red error boxes above if this persists.")
 
     # --- UI SECTION 2: SCANNER ---
     st.divider()
     st.subheader("📊 Market Delivery Scanner")
+    
     tab1, tab2, tab3 = st.tabs(["🔥 Strong (>80%)", "💎 Accumulation (60-80%)", "⚠️ Weak (<40%)"])
     
     cols_to_show = ['SYMBOL', 'CLOSE_PRICE', daily_col]
@@ -208,6 +257,7 @@ if daily_col:
     # --- UI SECTION 3: AI DECODER ---
     st.divider()
     st.subheader("🤖 AI Stock Decoder")
+    
     ai_default = search_ticker if search_ticker else ""
     col_ai_in, col_ai_out = st.columns([1, 4])
     
@@ -221,9 +271,19 @@ if daily_col:
             if not row.empty:
                 del_p = row[daily_col].iloc[0]
                 price = row['CLOSE_PRICE'].iloc[0] if 'CLOSE_PRICE' in row else "N/A"
-                prompt = f"Analyze {ai_ticker}. Price: {price}, Delivery %: {del_p}%. Is this high accumulation? Short verdict."
+                
+                prompt = (
+                    f"Analyze {ai_ticker}. Price: {price}, Delivery %: {del_p}%. "
+                    "Is this high delivery percentage a sign of 'Smart Money' accumulation or a trap? "
+                    "Provide a very short, professional verdict for a swing trader."
+                )
+                
                 with st.spinner(f"AI Analyzing {ai_ticker}..."):
-                    st.markdown(model.generate_content(prompt).text)
+                    try:
+                        response = model.generate_content(prompt)
+                        st.markdown(response.text)
+                    except Exception as e:
+                        st.error(f"AI Error: {e}")
             else:
                 st.warning("Data not found for analysis.")
 else:
