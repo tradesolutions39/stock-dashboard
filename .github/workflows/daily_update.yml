@@ -1,0 +1,28 @@
+name: Daily NSE Data Dump
+
+on:
+  schedule:
+    # Runs at 13:00 UTC (which is 6:30 PM IST) every day
+    - cron: '0 13 * * *'
+  workflow_dispatch: # Allows you to click a button to run it manually if needed
+
+jobs:
+  update-data:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install Libraries
+        run: pip install pandas nselib google-api-python-client google-auth
+
+      - name: Run Fetch Script
+        env:
+          GCP_SERVICE_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+          DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
+        run: python fetch_and_upload.py
