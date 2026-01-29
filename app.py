@@ -16,10 +16,12 @@ try:
         genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
         # Smart Model Selector
         try:
+            # Try Flash first (Fast & Free)
             test_model = genai.GenerativeModel('gemini-1.5-flash')
             test_model.generate_content("test") 
             model = test_model
         except:
+            # Fallback to Pro or whatever is available
             available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
             if available_models:
                 model = genai.GenerativeModel(available_models[0])
@@ -70,7 +72,7 @@ with st.spinner("Accessing Cloud Database..."):
 if data is None:
     st.error("❌ Data file not found. Please run the GitHub Action.")
 else:
-    # --- CLEANING & COLUMN FIX (The 66611% Solution) ---
+    # --- CLEANING & COLUMN FIX ---
     data.columns = [c.replace('"', '').strip() for c in data.columns]
     
     # Priority 1: Look for exact NSE percentage column
@@ -86,12 +88,12 @@ else:
         # Force numeric conversion
         data[target_col] = pd.to_numeric(data[target_col], errors='coerce').fillna(0)
         
-        # --- NEW FEATURE: SEARCH BAR ---
+        # --- SECTION A: SEARCH BAR ---
         st.subheader("🔍 Check Individual Stock")
         col_search, col_display = st.columns([1, 3])
         
-        with col_search:
-            search_ticker = st.text_input("Search Ticker (e.g. TARACHAND)", "").upper().strip()
+        # We store the search in a variable to use it later in AI section
+        search_ticker = col_search.text_input("Search Ticker (e.g. TARACHAND)", "").upper().strip()
             
         with col_display:
             if search_ticker:
@@ -104,15 +106,13 @@ else:
                     st.metric(f"{search_ticker} Delivery %", f"{val}%", f"Price: {price}")
                     st.dataframe(stock_row)
                 else:
-                    st.warning("Stock not found in today's list.")
+                    st.warning(f"Ticker '{search_ticker}' not found in today's data.")
 
-        # --- BUCKETS ---
+        # --- SECTION B: BUCKETS ---
         st.divider()
         st.subheader("📊 Market Delivery Scanner")
         
-        # Columns to display
         display_cols = ['SYMBOL', 'SERIES', 'CLOSE_PRICE', target_col]
-        # Filter only existing columns
         display_cols = [c for c in display_cols if c in data.columns]
         
         tab1, tab2, tab3 = st.tabs(["🔥 Strong (>80%)", "💎 Accumulation (60-80%)", "⚠️ Weak (<40%)"])
@@ -127,15 +127,44 @@ else:
             df = data[data[target_col] < 40].sort_values(by=target_col, ascending=False)
             st.dataframe(df[display_cols], use_container_width=True)
 
-        # --- AI ANALYSIS ---
+        # --- SECTION C: AI STOCK DECODER (FIXED) ---
         st.divider()
         st.subheader("🤖 AI Stock Decoder")
-        if st.button("Analyze Searched Stock") and search_ticker and model:
-            stock_row = data[data['SYMBOL'] == search_ticker]
-            if not stock_row.empty:
-                val = stock_row[target_col].iloc[0]
-                prompt = f"Analyze {search_ticker}. Delivery % is {val}. Is this high accumulation? Keep it short."
-                with st.spinner("AI analyzing..."):
-                    st.write(model.generate_content(prompt).text)
+        
+        # Auto-fill the AI input with the Search Ticker if it exists
+        default_val = search_ticker if search_ticker else ""
+        
+        col1, col2 = st.columns([1, 4])
+        with col1:
+            ai_ticker = st.text_input("Enter Ticker to Decode", value=default_val).upper().strip()
+            analyze_btn = st.button("Generate AI Report")
+        
+        with col2:
+            if analyze_btn and ai_ticker:
+                if not model:
+                    st.error("AI Model is not connected. Check API Key.")
+                else:
+                    # Find data for this ticker
+                    stock_row = data[data['SYMBOL'] == ai_ticker]
+                    
+                    if not stock_row.empty:
+                        del_per = stock_row[target_col].iloc[0]
+                        price = stock_row['CLOSE_PRICE'].iloc[0] if 'CLOSE_PRICE' in stock_row else "N/A"
+                        
+                        prompt = (
+                            f"Act as a professional stock analyst. "
+                            f"The Indian stock '{ai_ticker}' has a Delivery Percentage of {del_per}% at a price of {price}. "
+                            "Explain what this indicates (Accumulation vs Distribution). "
+                            "Provide a concise outlook for a swing trader."
+                        )
+                        
+                        with st.spinner(f"AI is analyzing {ai_ticker}..."):
+                            try:
+                                response = model.generate_content(prompt)
+                                st.markdown(response.text)
+                            except Exception as e:
+                                st.error(f"AI Error: {e}")
+                    else:
+                        st.warning(f"Could not find data for '{ai_ticker}' to analyze.")
     else:
         st.error(f"Could not find a Percentage column. Available: {list(data.columns)}")
