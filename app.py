@@ -11,6 +11,10 @@ import yfinance as yf
 st.set_page_config(page_title="Vivek's Pro Dashboard", layout="wide")
 st.title("📡 NSE Daily Scanner + Fundamentals")
 
+# --- INITIALIZE SESSION STATE FOR SEARCH ---
+if "search_ticker" not in st.session_state:
+    st.session_state.search_ticker = ""
+
 # --- 1. SETUP AI ---
 model = None
 try:
@@ -48,7 +52,6 @@ def clean_column_names(df):
     return df
 
 # --- 3. DATA LOADING ---
-
 if st.sidebar.button("🛠️ Reset/Refresh Data"):
     st.cache_data.clear()
     st.rerun()
@@ -112,14 +115,11 @@ def load_history_data():
         st.error(f"❌ Error loading history: {e}")
         return None
 
-# --- NEW: ADVANCED FUNDAMENTALS (GROWTH CHECK) ---
 @st.cache_data(ttl=86400)
 def get_fundamentals(ticker):
     try:
         stock = yf.Ticker(f"{ticker}.NS")
         info = stock.info
-        
-        # Get Financials for Trend Analysis (Annual)
         fin = stock.financials
         
         sales_growth = "N/A"
@@ -127,19 +127,15 @@ def get_fundamentals(ticker):
         eps_growth = "N/A"
         
         if not fin.empty and len(fin.columns) >= 2:
-            # Recent Year vs Previous Year
             curr = fin.iloc[:, 0]
             prev = fin.iloc[:, 1]
             
-            # 1. Sales Trend
             if 'Total Revenue' in fin.index:
                 sales_growth = "⬆️ Rising" if curr['Total Revenue'] > prev['Total Revenue'] else "⬇️ Falling"
             
-            # 2. EPS Trend
             if 'Basic EPS' in fin.index:
                 eps_growth = "⬆️ Rising" if curr['Basic EPS'] > prev['Basic EPS'] else "⬇️ Falling"
                 
-            # 3. OPM Trend (Operating Income / Revenue)
             if 'Operating Income' in fin.index and 'Total Revenue' in fin.index:
                 opm_curr = (curr['Operating Income'] / curr['Total Revenue']) * 100
                 opm_prev = (prev['Operating Income'] / prev['Total Revenue']) * 100
@@ -176,12 +172,13 @@ if not daily_deliv_col:
 if daily_deliv_col:
     daily_data[daily_deliv_col] = pd.to_numeric(daily_data[daily_deliv_col], errors='coerce').fillna(0)
 
-    # --- UI ---
+    # --- UI: SEARCH BAR (CONNECTED TO STATE) ---
     st.subheader("🔍 Smart Stock Analyzer")
     col_search, col_stats = st.columns([1, 3])
     
     with col_search:
-        search_ticker = st.text_input("Enter Ticker (e.g. TCS)", "").upper().strip()
+        # Key is crucial here to connect with dataframe selection
+        search_ticker = st.text_input("Enter Ticker (or Select from Scanner)", key="search_ticker").upper().strip()
 
     if search_ticker:
         row = daily_data[daily_data['SYMBOL'] == search_ticker]
@@ -198,11 +195,10 @@ if daily_deliv_col:
             with col_stats:
                 st.markdown(f"### Today: ₹{price} | Delivery: :{color_txt}[{val}%]")
         
-        # 2. FUNDAMENTAL HEALTH CHECK (UPDATED)
+        # 2. FUNDAMENTAL HEALTH CHECK
         with st.expander(f"📊 Fundamental Health Check: {search_ticker}", expanded=True):
             fund_data = get_fundamentals(search_ticker)
             if fund_data:
-                # Row 1: Basic Stats
                 c1, c2, c3, c4 = st.columns(4)
                 pe = fund_data['PE Ratio']
                 pe_color = "green" if pe and pe < 25 else "red"
@@ -215,15 +211,11 @@ if daily_deliv_col:
                 c4.metric("Sector", fund_data['Sector'])
                 
                 st.divider()
-                
-                # Row 2: GROWTH TRENDS
-                st.caption("Year-on-Year Growth Trends (Financials)")
+                st.caption("Year-on-Year Growth Trends")
                 g1, g2, g3 = st.columns(3)
-                
                 g1.metric("Sales Growth", fund_data['Sales Trend'])
                 g2.metric("OPM (Margins)", fund_data['OPM Trend'])
                 g3.metric("EPS (Profit)", fund_data['EPS Trend'])
-                
             else:
                 st.info("Fundamental data not available for this ticker.")
 
@@ -262,9 +254,10 @@ if daily_deliv_col:
                 else:
                     st.info(f"No history found for {search_ticker}")
 
-    # --- SCANNER ---
+    # --- SCANNER (INTERACTIVE) ---
     st.divider()
-    st.subheader("📊 Scanner")
+    st.subheader("📊 Select Stock from Scanner")
+    st.caption("👆 Click on any row to analyze that stock immediately.")
     
     cols = ['SYMBOL', 'CLOSE_PRICE', daily_deliv_col]
     cols = [c for c in cols if c in daily_data.columns]
@@ -273,23 +266,40 @@ if daily_deliv_col:
     
     tab1, tab2, tab3 = st.tabs(["🔥 High (80-99%)", "💎 Medium (60-80%)", "⚠️ Low (<40%)"])
     
+    # Function to handle selection
+    def show_interactive_table(df, key_name):
+        event = st.dataframe(
+            df,
+            use_container_width=True,
+            hide_index=True,
+            on_select="rerun",
+            selection_mode="single-row",
+            key=key_name
+        )
+        if len(event.selection.rows) > 0:
+            selected_row_index = event.selection.rows[0]
+            selected_symbol = df.iloc[selected_row_index]['SYMBOL']
+            # Update Session State to trigger top search
+            st.session_state.search_ticker = selected_symbol
+            st.rerun()
+
     with tab1:
-        df_high = df_clean[df_clean[daily_deliv_col] >= 80]
-        st.dataframe(df_high[cols].sort_values(daily_deliv_col, ascending=False), use_container_width=True)
+        df_high = df_clean[df_clean[daily_deliv_col] >= 80].sort_values(daily_deliv_col, ascending=False)
+        show_interactive_table(df_high[cols], "tab_high")
         
     with tab2:
-        df_med = df_clean[(df_clean[daily_deliv_col] >= 60) & (df_clean[daily_deliv_col] < 80)]
-        st.dataframe(df_med[cols].sort_values(daily_deliv_col, ascending=False), use_container_width=True)
+        df_med = df_clean[(df_clean[daily_deliv_col] >= 60) & (df_clean[daily_deliv_col] < 80)].sort_values(daily_deliv_col, ascending=False)
+        show_interactive_table(df_med[cols], "tab_med")
         
     with tab3:
-        df_low = df_clean[df_clean[daily_deliv_col] < 40]
-        st.dataframe(df_low[cols].sort_values(daily_deliv_col, ascending=True), use_container_width=True)
+        df_low = df_clean[df_clean[daily_deliv_col] < 40].sort_values(daily_deliv_col, ascending=True)
+        show_interactive_table(df_low[cols], "tab_low")
 
     # --- AI ANALYSIS ---
     st.divider()
     st.subheader("🤖 AI Analysis")
     
-    if st.button("Analyze Ticker") and search_ticker and model:
+    if st.button("Analyze Current Ticker") and search_ticker and model:
         row = daily_data[daily_data['SYMBOL'] == search_ticker]
         if not row.empty:
              val = row[daily_deliv_col].iloc[0]
@@ -306,12 +316,9 @@ if daily_deliv_col:
                  f"Act as a stock market expert. Analyze the stock {search_ticker}. "
                  f"Current Price: {pr}. Today's Delivery Percentage: {val}%. "
                  f"{fund_txt} "
-                 "Combine Technical (Delivery) and Fundamental (Growth) data. "
-                 "Is this a 'Turnaround Story' or 'Strong Compounder'? "
-                 "Explain why in 2-3 clear sentences. Do not give financial advice."
+                 "Combine Technical and Fundamental data. Is this a 'Turnaround' or 'Compounder'? "
+                 "Explain why in 2-3 clear sentences."
              )
              
              with st.spinner("AI thinking..."):
                  st.write(model.generate_content(prompt).text)
-        else:
-            st.warning("Data not found for AI analysis.")
