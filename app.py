@@ -43,26 +43,18 @@ except Exception as e:
 
 # --- HELPER: ROBUST COLUMN FINDER ---
 def find_delivery_column(df):
-    # Normalize column names (Uppercase, remove spaces/quotes)
     df.columns = [str(c).replace('"', '').strip().upper() for c in df.columns]
-    
-    # Priority 1: Exact Standard Names
-    priorities = ["%DLYQTTO TRADEDQTY", "DELIV_PER", "PCT_DELIV", "DELIVERY_PER"]
+    priorities = ["%DLYQTTO TRADEDQTY", "DELIV_PER", "PCT_DELIV", "DELIVERY_PER", "DELIV_QTY"] # Added DELIV_QTY as fallback
     for p in priorities:
         if p in df.columns:
             return p
-            
-    # Priority 2: Search for keywords (contains 'DELIV' and 'PER' or '%')
     for c in df.columns:
         if "DELIV" in c and ("PER" in c or "%" in c):
             return c
     return None
 
 def standardize_date_column(df):
-    # Normalize headers first
     df.columns = [str(c).replace('"', '').strip() for c in df.columns]
-    
-    # List of possible date column names from NSE
     candidates = ['Trade_Date', 'DATE1', 'TRADEDDATE', 'Date', 'TIMESTAMP', 'date']
     
     found_col = None
@@ -73,12 +65,15 @@ def standardize_date_column(df):
     
     if found_col:
         df.rename(columns={found_col: 'Trade_Date'}, inplace=True)
-        # Convert to datetime object
         df['Trade_Date'] = pd.to_datetime(df['Trade_Date'], errors='coerce')
         return True
     return False
 
-# --- 3. LOAD DATA FUNCTIONS ---
+# --- 3. LOAD DATA FUNCTIONS (WITH CACHE CLEARING) ---
+if st.sidebar.button("🛠️ Reset/Refresh Data"):
+    st.cache_data.clear()
+    st.rerun()
+
 @st.cache_data(ttl=3600)
 def load_daily_data():
     try:
@@ -107,11 +102,8 @@ def load_history_data():
         downloaded = io.BytesIO(request.execute())
         
         df = pd.read_csv(downloaded)
-        
-        # FIX: Ensure Date Column exists and is named 'Trade_Date'
-        success = standardize_date_column(df)
-        
-        return df if success else None
+        standardize_date_column(df) # Apply fix
+        return df
     except:
         return None
 
@@ -124,11 +116,9 @@ if daily_data is None:
     st.error("❌ 'latest_nse_data.csv' not found. Please run the Daily Action.")
     st.stop()
 
-# Find Target Column for Daily Data
 daily_col = find_delivery_column(daily_data)
 
 if daily_col:
-    # Clean Numeric Data
     daily_data[daily_col] = pd.to_numeric(daily_data[daily_col], errors='coerce').fillna(0)
     
     # --- UI SECTION 1: SEARCH & CHART ---
@@ -146,70 +136,63 @@ if daily_col:
             if not today_row.empty:
                 val = today_row[daily_col].iloc[0]
                 price = today_row['CLOSE_PRICE'].iloc[0] if 'CLOSE_PRICE' in daily_data.columns else "-"
-                
                 color = "green" if val > 60 else "orange" if val > 40 else "red"
                 st.markdown(f"### Today: ₹{price} | Delivery: :{color}[{val}%]")
             else:
                 st.warning(f"Ticker '{search_ticker}' not found in today's active list.")
 
-        # B. Show Historical Chart (FIXED)
+        # B. Show Historical Chart (CRASH PROOF)
         if history_data is not None:
-            # Filter for Stock
-            stock_hist = history_data[history_data['SYMBOL'] == search_ticker].copy()
-            
-            if not stock_hist.empty and 'Trade_Date' in stock_hist.columns:
-                stock_hist = stock_hist.sort_values('Trade_Date')
+            # Check if columns exist BEFORE filtering
+            if 'Trade_Date' not in history_data.columns:
+                st.error(f"⚠️ Date Column missing in History File. Found: {list(history_data.columns)}")
+                st.info("Try clicking 'Reset Data' in sidebar.")
+            else:
+                stock_hist = history_data[history_data['SYMBOL'] == search_ticker].copy()
                 
-                # Find History Column using the robust function
-                hist_col = find_delivery_column(stock_hist)
-                
-                if hist_col:
-                    # Clean History Data
-                    stock_hist[hist_col] = pd.to_numeric(stock_hist[hist_col], errors='coerce')
+                if not stock_hist.empty:
+                    stock_hist = stock_hist.sort_values('Trade_Date')
+                    hist_col = find_delivery_column(stock_hist)
                     
-                    # Create Chart
-                    fig = go.Figure()
-
-                    # Bar Chart (Delivery %)
-                    fig.add_trace(go.Bar(
-                        x=stock_hist['Trade_Date'],
-                        y=stock_hist[hist_col],
-                        name='Delivery %',
-                        marker_color='rgba(50, 171, 96, 0.6)',
-                        yaxis='y2'
-                    ))
-
-                    # Line Chart (Price)
-                    price_col = next((c for c in stock_hist.columns if "CLOSE" in c), None)
-                    
-                    if price_col:
-                        fig.add_trace(go.Scatter(
+                    if hist_col:
+                        stock_hist[hist_col] = pd.to_numeric(stock_hist[hist_col], errors='coerce')
+                        
+                        fig = go.Figure()
+                        fig.add_trace(go.Bar(
                             x=stock_hist['Trade_Date'],
-                            y=stock_hist[price_col],
-                            name='Price',
-                            line=dict(color='rgb(0, 0, 0)', width=2)
+                            y=stock_hist[hist_col],
+                            name='Delivery %',
+                            marker_color='rgba(50, 171, 96, 0.6)',
+                            yaxis='y2'
                         ))
 
-                    # Layout
-                    fig.update_layout(
-                        title=f'{search_ticker} - Price vs Delivery Trend (1 Year)',
-                        yaxis=dict(title='Price', side='left'),
-                        yaxis2=dict(title='Delivery %', side='right', overlaying='y', range=[0, 100]),
-                        legend=dict(x=0, y=1.1, orientation='h'),
-                        height=400
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
+                        price_col = next((c for c in stock_hist.columns if "CLOSE" in c), None)
+                        if price_col:
+                            fig.add_trace(go.Scatter(
+                                x=stock_hist['Trade_Date'],
+                                y=stock_hist[price_col],
+                                name='Price',
+                                line=dict(color='rgb(0, 0, 0)', width=2)
+                            ))
+
+                        fig.update_layout(
+                            title=f'{search_ticker} - Price vs Delivery Trend (1 Year)',
+                            yaxis=dict(title='Price', side='left'),
+                            yaxis2=dict(title='Delivery %', side='right', overlaying='y', range=[0, 100]),
+                            legend=dict(x=0, y=1.1, orientation='h'),
+                            height=400
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+                    else:
+                        st.warning("History file loaded, but Delivery Column not found.")
                 else:
-                    st.warning(f"Could not find Delivery Column in history file.")
-            else:
-                st.info(f"No historical data found for {search_ticker}. (Check if backfill completed)")
+                    st.info(f"No history found for {search_ticker}. The archive might be incomplete.")
         else:
-            st.warning("History file is loading... (Or Date column is missing)")
+            st.warning("History file is loading... (If this persists, click 'Reset Data')")
 
     # --- UI SECTION 2: SCANNER ---
     st.divider()
     st.subheader("📊 Market Delivery Scanner")
-    
     tab1, tab2, tab3 = st.tabs(["🔥 Strong (>80%)", "💎 Accumulation (60-80%)", "⚠️ Weak (<40%)"])
     
     cols_to_show = ['SYMBOL', 'CLOSE_PRICE', daily_col]
@@ -225,7 +208,6 @@ if daily_col:
     # --- UI SECTION 3: AI DECODER ---
     st.divider()
     st.subheader("🤖 AI Stock Decoder")
-    
     ai_default = search_ticker if search_ticker else ""
     col_ai_in, col_ai_out = st.columns([1, 4])
     
