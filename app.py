@@ -9,36 +9,24 @@ import io
 st.set_page_config(page_title="Vivek's Pro Dashboard", layout="wide")
 st.title("📡 NSE Daily Scanner (Drive Connected)")
 
-# --- 1. ROBUST AI SETUP (The Fix) ---
+# --- 1. ROBUST AI SETUP ---
 model = None
 try:
     if "GEMINI_API_KEY" in st.secrets:
         genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-        
-        # 1. Try to use the newest Flash model directly
+        # Smart Model Selector
         try:
             test_model = genai.GenerativeModel('gemini-1.5-flash')
-            # Light test to see if it connects
             test_model.generate_content("test") 
             model = test_model
-            # st.toast("✅ Connected to Gemini 1.5 Flash")
         except:
-            # 2. If Flash fails, list available models and pick the first one
-            available_models = []
-            for m in genai.list_models():
-                if 'generateContent' in m.supported_generation_methods:
-                    available_models.append(m.name)
-            
+            available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
             if available_models:
-                target_model = available_models[0] # Just pick the first working one
-                model = genai.GenerativeModel(target_model)
-                # st.toast(f"✅ Connected to fallback model: {target_model}")
+                model = genai.GenerativeModel(available_models[0])
             else:
-                st.error("⚠️ AI Error: No available models found for this API Key.")
-    else:
-        st.warning("⚠️ AI Key missing. Check 'GEMINI_API_KEY' in secrets.")
+                st.warning("⚠️ AI Error: No models available.")
 except Exception as e:
-    st.warning(f"AI functionality disabled: {e}")
+    st.warning(f"AI disabled: {e}")
 
 # --- 2. SETUP GOOGLE DRIVE ---
 try:
@@ -50,13 +38,13 @@ try:
         )
         drive_service = build('drive', 'v3', credentials=creds)
     else:
-        st.error("⚠️ Secrets Error: 'gcp_service_account' not found.")
+        st.error("⚠️ Secrets Error: 'gcp_service_account' missing.")
         st.stop()
 except Exception as e:
     st.error(f"Authentication Error: {e}")
     st.stop()
 
-# --- 3. LOAD DATA FROM DRIVE ---
+# --- 3. LOAD DATA ---
 @st.cache_data(ttl=3600)
 def load_data_from_drive():
     try:
@@ -82,64 +70,72 @@ with st.spinner("Accessing Cloud Database..."):
 if data is None:
     st.error("❌ Data file not found. Please run the GitHub Action.")
 else:
-    # Cleaning
+    # --- CLEANING & COLUMN FIX (The 66611% Solution) ---
     data.columns = [c.replace('"', '').strip() for c in data.columns]
     
-    # Column Finder
+    # Priority 1: Look for exact NSE percentage column
     target_col = "%DlyQttoTradedQty"
+    
+    # Priority 2: Look for columns with '%' or 'Per' (to avoid Quantity)
     if target_col not in data.columns:
-        possible = [c for c in data.columns if "DlyQt" in c or "DELIV" in c]
+        possible = [c for c in data.columns if "%" in c or "PER" in c.upper()]
         if possible: target_col = possible[0]
-        
-    if target_col in data.columns:
+        else: target_col = None
+
+    if target_col:
+        # Force numeric conversion
         data[target_col] = pd.to_numeric(data[target_col], errors='coerce').fillna(0)
         
+        # --- NEW FEATURE: SEARCH BAR ---
+        st.subheader("🔍 Check Individual Stock")
+        col_search, col_display = st.columns([1, 3])
+        
+        with col_search:
+            search_ticker = st.text_input("Search Ticker (e.g. TARACHAND)", "").upper().strip()
+            
+        with col_display:
+            if search_ticker:
+                stock_row = data[data['SYMBOL'] == search_ticker]
+                if not stock_row.empty:
+                    val = stock_row[target_col].iloc[0]
+                    price = stock_row['CLOSE_PRICE'].iloc[0] if 'CLOSE_PRICE' in data.columns else "N/A"
+                    
+                    # Display Stats
+                    st.metric(f"{search_ticker} Delivery %", f"{val}%", f"Price: {price}")
+                    st.dataframe(stock_row)
+                else:
+                    st.warning("Stock not found in today's list.")
+
         # --- BUCKETS ---
-        st.subheader("📊 Delivery Analysis")
+        st.divider()
+        st.subheader("📊 Market Delivery Scanner")
+        
+        # Columns to display
+        display_cols = ['SYMBOL', 'SERIES', 'CLOSE_PRICE', target_col]
+        # Filter only existing columns
+        display_cols = [c for c in display_cols if c in data.columns]
+        
         tab1, tab2, tab3 = st.tabs(["🔥 Strong (>80%)", "💎 Accumulation (60-80%)", "⚠️ Weak (<40%)"])
         
-        cols = ['SYMBOL', 'CLOSE_PRICE', target_col]
-        
         with tab1:
-            st.dataframe(data[data[target_col] >= 80][cols].sort_values(by=target_col, ascending=False), use_container_width=True)
+            df = data[data[target_col] >= 80].sort_values(by=target_col, ascending=False)
+            st.dataframe(df[display_cols], use_container_width=True)
         with tab2:
-            st.dataframe(data[(data[target_col] >= 60) & (data[target_col] < 80)][cols].sort_values(by=target_col, ascending=False), use_container_width=True)
+            df = data[(data[target_col] >= 60) & (data[target_col] < 80)].sort_values(by=target_col, ascending=False)
+            st.dataframe(df[display_cols], use_container_width=True)
         with tab3:
-            st.dataframe(data[data[target_col] < 40][cols].sort_values(by=target_col, ascending=False), use_container_width=True)
+            df = data[data[target_col] < 40].sort_values(by=target_col, ascending=False)
+            st.dataframe(df[display_cols], use_container_width=True)
 
-    # --- AI ANALYSIS SECTION ---
-    st.divider()
-    st.subheader("🤖 AI Stock Decoder")
-    
-    col1, col2 = st.columns([1, 4])
-    with col1:
-        ticker_input = st.text_input("Enter Ticker (e.g. TCS)", "").upper().strip()
-        analyze_btn = st.button("Decode with AI")
-    
-    with col2:
-        if analyze_btn and ticker_input:
-            if not model:
-                st.error("AI Model is not connected. Check API Key.")
-            else:
-                # Find data for this ticker
-                stock_row = data[data['SYMBOL'] == ticker_input]
-                
-                if not stock_row.empty:
-                    del_per = stock_row[target_col].iloc[0]
-                    price = stock_row['CLOSE_PRICE'].iloc[0] if 'CLOSE_PRICE' in stock_row else "N/A"
-                    
-                    prompt = (
-                        f"Analyze the Indian stock {ticker_input}. "
-                        f"It has a very high Delivery Percentage of {del_per}% at a price of {price}. "
-                        "Explain to a beginner investor: Does this indicate 'Smart Money' accumulation? "
-                        "What are the risks? Keep it short and professional."
-                    )
-                    
-                    with st.spinner(f"AI is analyzing {ticker_input}..."):
-                        try:
-                            response = model.generate_content(prompt)
-                            st.markdown(response.text)
-                        except Exception as e:
-                            st.error(f"AI Error: {e}")
-                else:
-                    st.warning(f"Ticker '{ticker_input}' not found in today's list.")
+        # --- AI ANALYSIS ---
+        st.divider()
+        st.subheader("🤖 AI Stock Decoder")
+        if st.button("Analyze Searched Stock") and search_ticker and model:
+            stock_row = data[data['SYMBOL'] == search_ticker]
+            if not stock_row.empty:
+                val = stock_row[target_col].iloc[0]
+                prompt = f"Analyze {search_ticker}. Delivery % is {val}. Is this high accumulation? Keep it short."
+                with st.spinner("AI analyzing..."):
+                    st.write(model.generate_content(prompt).text)
+    else:
+        st.error(f"Could not find a Percentage column. Available: {list(data.columns)}")
