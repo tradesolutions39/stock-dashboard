@@ -4,7 +4,6 @@ import google.generativeai as genai
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 import io
-import plotly.express as px
 import plotly.graph_objects as go
 
 # --- PAGE CONFIG ---
@@ -17,12 +16,10 @@ try:
     if "GEMINI_API_KEY" in st.secrets:
         genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
         try:
-            # Try Flash model first
             test_model = genai.GenerativeModel('gemini-1.5-flash')
             test_model.generate_content("test") 
             model = test_model
         except:
-            # Fallback
             available = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
             if available: model = genai.GenerativeModel(available[0])
 except Exception:
@@ -44,9 +41,25 @@ except Exception as e:
     st.error(f"Authentication Error: {e}")
     st.stop()
 
-# --- 3. LOAD DATA FUNCTIONS ---
+# --- HELPER: ROBUST COLUMN FINDER ---
+def find_delivery_column(df):
+    # Normalize column names (Uppercase, remove spaces/quotes)
+    df.columns = [str(c).replace('"', '').strip().upper() for c in df.columns]
+    
+    # Priority 1: Exact Standard Names
+    priorities = ["%DLYQTTO TRADEDQTY", "DELIV_PER", "PCT_DELIV", "DELIVERY_PER"]
+    for p in priorities:
+        if p in df.columns:
+            return p
+            
+    # Priority 2: Search for keywords (contains 'DELIV' and 'PER' or '%')
+    for c in df.columns:
+        if "DELIV" in c and ("PER" in c or "%" in c):
+            return c
+            
+    return None
 
-# Function A: Load Today's Data (Fast)
+# --- 3. LOAD DATA FUNCTIONS ---
 @st.cache_data(ttl=3600)
 def load_daily_data():
     try:
@@ -62,7 +75,6 @@ def load_daily_data():
     except:
         return None
 
-# Function B: Load History Archive (Big File)
 @st.cache_data(ttl=3600)
 def load_history_data():
     try:
@@ -75,42 +87,38 @@ def load_history_data():
         request = drive_service.files().get_media(fileId=file_id)
         downloaded = io.BytesIO(request.execute())
         
-        # Read CSV but optimize memory
+        # Optimize: Read distinct columns only if file is huge, but here we read all
         df = pd.read_csv(downloaded)
         
-        # Clean columns immediately
-        df.columns = [c.replace('"', '').strip() for c in df.columns]
-        
-        # Parse Dates
-        if 'Trade_Date' in df.columns:
-            df['Trade_Date'] = pd.to_datetime(df['Trade_Date'])
-            
+        # Standardize Date Column immediately
+        # Backfill script uses 'Trade_Date', NSE raw uses 'DATE1' or 'TRADEDDATE'
+        date_cols = ['Trade_Date', 'DATE1', 'TRADEDDATE', 'Date']
+        for d in date_cols:
+            # Check case-insensitive
+            match = next((c for c in df.columns if c.lower() == d.lower()), None)
+            if match:
+                df['Trade_Date'] = pd.to_datetime(df[match])
+                break
+                
         return df
     except:
         return None
 
-# --- 4. DATA LOADING & CLEANING ---
+# --- 4. MAIN DASHBOARD ---
 with st.spinner("Syncing with Cloud Database..."):
     daily_data = load_daily_data()
-    # Load history in background (cached)
     history_data = load_history_data()
 
 if daily_data is None:
     st.error("❌ 'latest_nse_data.csv' not found. Please run the Daily Action.")
     st.stop()
 
-# Clean Daily Data
-daily_data.columns = [c.replace('"', '').strip() for c in daily_data.columns]
+# Find Target Column for Daily Data
+daily_col = find_delivery_column(daily_data)
 
-# Find Percentage Column
-target_col = "%DlyQttoTradedQty"
-if target_col not in daily_data.columns:
-    possible = [c for c in daily_data.columns if "%" in c or "PER" in c.upper()]
-    if possible: target_col = possible[0]
-    else: target_col = None
-
-if target_col:
-    daily_data[target_col] = pd.to_numeric(daily_data[target_col], errors='coerce').fillna(0)
+if daily_col:
+    # Clean Numeric Data
+    daily_data[daily_col] = pd.to_numeric(daily_data[daily_col], errors='coerce').fillna(0)
     
     # --- UI SECTION 1: SEARCH & CHART ---
     st.subheader("🔍 Smart Stock Analyzer")
@@ -125,43 +133,48 @@ if target_col:
         
         with col_stats:
             if not today_row.empty:
-                val = today_row[target_col].iloc[0]
+                val = today_row[daily_col].iloc[0]
                 price = today_row['CLOSE_PRICE'].iloc[0] if 'CLOSE_PRICE' in daily_data.columns else "-"
                 
-                # Dynamic Color
                 color = "green" if val > 60 else "orange" if val > 40 else "red"
                 st.markdown(f"### Today: ₹{price} | Delivery: :{color}[{val}%]")
             else:
                 st.warning(f"Ticker '{search_ticker}' not found in today's active list.")
 
-        # B. Show Historical Chart
+        # B. Show Historical Chart (THE FIX IS HERE)
         if history_data is not None:
-            stock_hist = history_data[history_data['SYMBOL'] == search_ticker].sort_values('Trade_Date')
+            # Filter for Stock
+            stock_hist = history_data[history_data['SYMBOL'] == search_ticker].copy()
             
-            if not stock_hist.empty:
-                # Identify History Columns
-                h_target_col = "%DlyQttoTradedQty"
-                if h_target_col not in stock_hist.columns:
-                    possible = [c for c in stock_hist.columns if "%" in c]
-                    if possible: h_target_col = possible[0]
+            if not stock_hist.empty and 'Trade_Date' in stock_hist.columns:
+                stock_hist = stock_hist.sort_values('Trade_Date')
                 
-                if h_target_col:
-                    # Create Dual-Axis Chart
+                # Find History Column using the robust function
+                hist_col = find_delivery_column(stock_hist)
+                
+                if hist_col:
+                    # Clean History Data
+                    stock_hist[hist_col] = pd.to_numeric(stock_hist[hist_col], errors='coerce')
+                    
+                    # Create Chart
                     fig = go.Figure()
 
                     # Bar Chart (Delivery %)
                     fig.add_trace(go.Bar(
                         x=stock_hist['Trade_Date'],
-                        y=stock_hist[h_target_col],
+                        y=stock_hist[hist_col],
                         name='Delivery %',
                         marker_color='rgba(50, 171, 96, 0.6)',
                         yaxis='y2'
                     ))
 
                     # Line Chart (Price)
+                    # Find Close Price column carefully
+                    price_col = next((c for c in stock_hist.columns if "CLOSE" in c), "CLOSE_PRICE")
+                    
                     fig.add_trace(go.Scatter(
                         x=stock_hist['Trade_Date'],
-                        y=stock_hist['CLOSE_PRICE'],
+                        y=stock_hist[price_col],
                         name='Price',
                         line=dict(color='rgb(0, 0, 0)', width=2)
                     ))
@@ -176,56 +189,50 @@ if target_col:
                     )
                     st.plotly_chart(fig, use_container_width=True)
                 else:
-                    st.info("Historical Delivery column not found.")
+                    st.warning(f"Could not find Delivery Column in history file. Available: {list(stock_hist.columns)}")
             else:
-                st.info(f"No historical data found for {search_ticker} in archive.")
+                st.info(f"No historical data found for {search_ticker}. (Check if backfill completed)")
         else:
-            st.warning("History file is loading or missing. Only today's data is available.")
+            st.warning("History file is loading... (First run might take time)")
 
     # --- UI SECTION 2: SCANNER ---
     st.divider()
     st.subheader("📊 Market Delivery Scanner")
     
     tab1, tab2, tab3 = st.tabs(["🔥 Strong (>80%)", "💎 Accumulation (60-80%)", "⚠️ Weak (<40%)"])
-    cols_to_show = ['SYMBOL', 'CLOSE_PRICE', target_col]
+    
+    # Safe Column Selection
+    cols_to_show = ['SYMBOL', 'CLOSE_PRICE', daily_col]
     cols_to_show = [c for c in cols_to_show if c in daily_data.columns]
     
     with tab1:
-        st.dataframe(daily_data[daily_data[target_col] >= 80][cols_to_show].sort_values(target_col, ascending=False), use_container_width=True)
+        st.dataframe(daily_data[daily_data[daily_col] >= 80][cols_to_show].sort_values(daily_col, ascending=False), use_container_width=True)
     with tab2:
-        st.dataframe(daily_data[(daily_data[target_col] >= 60) & (daily_data[target_col] < 80)][cols_to_show].sort_values(target_col, ascending=False), use_container_width=True)
+        st.dataframe(daily_data[(daily_data[daily_col] >= 60) & (daily_data[daily_col] < 80)][cols_to_show].sort_values(daily_col, ascending=False), use_container_width=True)
     with tab3:
-        st.dataframe(daily_data[daily_data[target_col] < 40][cols_to_show].sort_values(target_col, ascending=False), use_container_width=True)
+        st.dataframe(daily_data[daily_data[daily_col] < 40][cols_to_show].sort_values(daily_col, ascending=False), use_container_width=True)
 
     # --- UI SECTION 3: AI DECODER ---
     st.divider()
     st.subheader("🤖 AI Stock Decoder")
     
-    # Auto-fill ticker
     ai_default = search_ticker if search_ticker else ""
-    
     col_ai_in, col_ai_out = st.columns([1, 4])
+    
     with col_ai_in:
         ai_ticker = st.text_input("Analyze Ticker", value=ai_default, key="ai_input").upper().strip()
         btn_analyze = st.button("Generate Report")
         
     with col_ai_out:
         if btn_analyze and ai_ticker and model:
-            # Check if we have data (Try Today's data first)
             row = daily_data[daily_data['SYMBOL'] == ai_ticker]
-            
             if not row.empty:
-                del_p = row[target_col].iloc[0]
+                del_p = row[daily_col].iloc[0]
                 price = row['CLOSE_PRICE'].iloc[0] if 'CLOSE_PRICE' in row else "N/A"
-                
-                prompt = (
-                    f"Analyze the Indian stock '{ai_ticker}'. "
-                    f"Today's Price: {price}, Delivery %: {del_p}%. "
-                    "Is this high delivery percentage a sign of 'Smart Money' accumulation or a trap? "
-                    "Provide a very short, professional verdict for a swing trader."
-                )
-                
+                prompt = f"Analyze {ai_ticker}. Price: {price}, Delivery %: {del_p}%. Is this high accumulation? Short verdict."
                 with st.spinner(f"AI Analyzing {ai_ticker}..."):
                     st.markdown(model.generate_content(prompt).text)
             else:
                 st.warning("Data not found for analysis.")
+else:
+    st.error(f"CRITICAL: Could not find any Delivery Percentage column. Columns found: {list(daily_data.columns)}")
